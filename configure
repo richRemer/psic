@@ -1,0 +1,33 @@
+#!/bin/bash -e
+
+declare prefix=/usr/local
+declare cachedir=/var/cache
+declare shared=1
+
+if test "$1" = --help; then
+  echo "Usage: configure [--prefix=DIR] [--cachedir=DIR] [--shared|--user]"
+  exit
+fi
+
+while test $# -gt 0; do
+  case "$1" in
+    --shared)     shared=1;         shift;;
+    --user)       shared=;          shift;;
+    --prefix=*)   prefix=${2#*=};   shift;;
+    --cachedir=*) cachedir=${2#*=}; shift;;
+    --prefix)     prefix=$2;        shift 2 || {
+        echo "--prefix requires value" >&2;   exit 10; };;
+    --cachedir)   cachedir=$2;      shift 2 || {
+        echo "--cachedir requires value" >&2; exit 10; };;
+    -*) echo "invalid option: $1" >&2;        exit 3;;
+    *)  echo "unexpected argument: $1" >&2;   exit 2;;
+  esac
+done
+
+cd $(dirname "$0")
+
+(
+  echo PREFIX=$prefix
+  echo CACHEDIR=$cachedir
+  echo SHARED=$shared
+) > build/settings

@@ -1,0 +1,6 @@
+v0.0.1
+======
+
+Bugs
+----
+ * ignores debootstrap errors; generates invalid cache

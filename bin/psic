@@ -1,0 +1,134 @@
+#!/bin/bash -e
+
+# templated variable configured during install
+declare cachedir={{cachedir}}
+
+declare PSI_CACHEDIR=${cachedir:-/var/cache/psi}
+declare PSI_LIB=${PSI_LIB:-../lib/psi/psilib}
+
+declare tmpdir=$(mktemp -d); trap "rm -rf $tmpdir || sudo rm -rf $tmpdir" EXIT
+declare -A dynvars=()
+declare -a lines=() tokens=()
+declare src line cmdline cmd var cwd
+declare -i linenum=0
+declare outfile= tmpfile=
+
+usage () {
+  echo "Usage: psic [-o <out-file>] <src-file>"
+}
+
+while test "${1:0:1}" = -; do
+  case "$1" in
+    --help)     usage; exit;;
+    --)         shift; break;;
+    -[a-z0-9]*)
+      while getopts o: opt; do
+        case "$opt" in
+          o) outfile=$OPTARG;;
+        esac
+      done
+      shift $((OPTIND-1));;
+    *)
+      echo "invalid option: $1" >&2
+      exit 3;;
+  esac
+done
+
+if test $# -eq 0; then
+  echo "missing source file" >&2
+  exit 1
+elif test $# -gt 1; then
+  echo "unexpected argument: $2" >&2
+  exit 2
+elif ! test -e "$1"; then
+  echo "$1 does not exist" >&2
+  exit 101
+fi
+
+src=$1
+
+declare PSI_DEB=$tmpdir/deb
+declare PSI_SCRATCH=$tmpdir/scratch
+declare PSI_TARGET=$tmpdir/target
+declare PSI_FILTER=
+
+export PSI_CACHEDIR PSI_DEB PSI_FILTER PSI_LIB PSI_SCRATCH PSI_TARGET
+
+mkdir $PSI_DEB $PSI_SCRATCH $PSI_TARGET
+readarray -t lines < "$src"
+
+# wrangle streams to avoid unwanted output
+if test "$outfile" = -; then
+  exec 3>&1 1>&2
+fi
+
+# import lib relative to psic binary
+cwd=$(pwd); cd "$(dirname "$0")"
+source "$PSI_LIB"
+cd "$cwd"
+
+# load dynvamic variable functions
+for fn in $(declare -F | cut -f3 -d" " | grep ^psi-dynvar-); do
+  var=$(cut -f3- -d- <<< $fn)
+  dynvars[$var]=$fn
+done
+
+# as a convenience, run from an empty directory to avoid glob matching
+cwd=$(pwd)
+mkdir $tmpdir/empty; cd $tmpdir/empty
+
+for line in "${lines[@]}"; do
+  linenum=$((linenum+1))
+  cmdline="$line"
+
+  test "${cmdline:0:1}" = "#" && continue
+  test "$cmdline" || continue
+
+  cmd=${cmdline%% *}
+  cmdargs=${cmdline#* }
+
+  if test "$(type -t psi-$cmd)" = function; then
+    read -ra tokens <<< "$cmdline"
+
+    tokens[0]=psi-${tokens[0]}
+
+    for i in $(seq 1 $((${#tokens[@]}-1))); do
+      for var in ${!dynvars[@]}; do
+        if grep -q \${$var} <<< "${tokens[$i]}"; then
+          tokens[$i]=$(sed -e s/\\\${$var}/$(${dynvars[$var]})/g <<< "${tokens[$i]}")
+        fi
+      done
+
+      tokens[$i]="$(printf '%q' "${tokens[$i]}")"
+    done
+
+    eval "${tokens[@]}" || {
+      echo "ERROR: [$src:$linenum] $line" >&2
+      exit 200
+    }
+  else
+    echo "$line" > $tmpdir/shell
+    source $tmpdir/shell || {
+      echo "ERROR: [$src:$linenum] $line" >&2
+      exit 200
+    }
+  fi
+done
+
+# restore original directory before writing output
+cd "$cwd"
+
+if test "$outfile" = -; then
+  tar czS -C $PSI_TARGET . >&3
+else
+  tmpfile=$(dirname "$src")/tmp.image
+  touch "$tmpfile"
+  tar czS -C $PSI_TARGET . > "$tmpfile"
+
+  if test -z "$outfile"; then
+    outfile=$(basename "$src" .psi)-$(md5sum "$tmpfile" | cut -f1 -d" ").tgz
+  fi
+
+  mv "$tmpfile" "$outfile"
+  echo "successfully built image in $outfile"
+fi

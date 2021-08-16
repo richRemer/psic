@@ -1,0 +1,176 @@
+#!/bin/bash
+
+#############################
+# PSI Execution Environment #
+#---------------------------#
+# $PSI_CACHEDIR cache dir   #
+# $PSI_DEB      deb dir     #
+# $PSI_FILTER   copy filter #
+# $PSI_LIB      lib path    #
+# $PSI_SCRATCH  scratch dir #
+# $PSI_TARGET   target dir  #
+#############################
+
+psi-append () {
+  local file=$1; shift
+  echo "$@" >> "$PSI_TARGET$file"
+}
+
+psi-copy () {
+  local expanded=$(echo $PSI_DEB$1)
+  local dir=$(dirname "$1")
+  local filter
+
+  rm -rf $PSI_SCRATCH/*
+  mkdir -p "$PSI_SCRATCH$dir"
+
+  if test "$PSI_DEB$1" = "$expanded" -a -L "$PSI_DEB$1"; then
+    cp -L "$PSI_DEB$1" "$PSI_SCRATCH$dir/"
+  else
+    cp -r $PSI_DEB$1 "$PSI_SCRATCH$dir/"
+  fi
+
+  for filter in $PSI_FILTER; do
+    rm -rf $PSI_SCRATCH$filter
+  done
+
+  cp -rT $PSI_SCRATCH $PSI_TARGET
+}
+
+psi-copy-coreutils () {
+  for bin in $(dpkg-query -L coreutils | grep ^/'s\?'bin/ | sed -e s@^@/usr@); do
+    psi-copy $bin
+  done
+}
+
+psi-copy-filter () {
+  export PSI_FILTER=$(echo "$PSI_FILTER" "$1")
+}
+
+psi-copy-libs () {
+  local -a libs=()
+
+  # build list of required libraries needed by binaries
+  libs=($(find $PSI_TARGET/usr/bin $PSI_TARGET/usr/sbin -type f -exec ldd {} \; \
+    | grep = | grep -v "not found" \
+    | cut -d= -f2 | cut -d" " -f2 \
+    | sort -u | sed -e s@^@/usr@))
+
+  # copy required libraries from debootstrap image to target
+  for lib in "${libs[@]}"; do
+    if test -e $PSI_DEB$lib; then
+      psi-copy $lib
+    elif test -e $PSI_DEB/usr$lib; then
+      psi-copy /usr$lib
+    else
+      echo "could not copy required library: $lib" >&2
+    fi
+  done
+}
+
+psi-debootstrap () {
+  local -a opts=()
+  local hash=$(echo -n "$@" | sha1sum | cut -f1 -d" ")
+
+  echo hashed $hash from "$@"
+  test -e "$PSI_CACHEDIR/$hash.tgz" \
+    && echo "$PSI_CACHEDIR/$hash.tgz" exists \
+    || echo "$PSI_CACHEDIR/$hash.tgz" does not exist
+
+  if test -e "$PSI_CACHEDIR/$hash.tgz"; then
+    echo "using cached debootstrap image $hash"
+    sudo tar xzSf "$PSI_CACHEDIR/$hash.tgz" -C $PSI_DEB
+    sudo chown -R $(whoami):$(whoami) $PSI_DEB
+    return
+  fi
+
+  while test "${1:0:1}" = -; do
+    opts+=("$1")
+    shift
+  done
+
+  local release=$1
+
+  sudo debootstrap "${opts[@]}" $release $PSI_DEB $PSI_MIRROR
+  sudo chown -R $(whoami):$(whoami) $PSI_DEB
+
+  if test -w "$PSI_CACHEDIR"; then
+    tar czSf "$PSI_CACHEDIR/$hash.tgz" -C $PSI_DEB .
+    echo "wrote debootstrap image to cache $hash"
+  fi
+}
+
+psi-debug () {
+  set +x
+  case "$1" in
+    on|"")  set -x;;
+    off)    :;;
+    *)      echo "invalid debug arg: $1" >&2; return 1;;
+  esac
+}
+
+psi-dir () {
+  mkdir -p "$PSI_TARGET$1"
+}
+
+psi-dynvar-NODEJS_VERSION () {
+  sudo chroot "$PSI_TARGET" /usr/bin/node --version | sed -e s/^v//
+}
+
+psi-dynvar-PHP_VERSION () {
+  sudo chroot "$PSI_TARGET" /usr/bin/php --version | head -n1 | cut -f2 -d" "
+}
+
+psi-dynvar-PHP_MAJOR () {
+  psi-dynvar-PHP_VERSION | cut -f1 -d.
+}
+
+psi-dynvar-PHP_MINOR () {
+  psi-dynvar-PHP_VERSION | cut -f2 -d.
+}
+
+psi-empty () {
+  local dir=$(dirname "$1")
+  psi-dir "$dir"
+  echo -n > "$PSI_TARGET$1"
+}
+
+psi-link () {
+  local dir=$(dirname "$1")
+  psi-dir "$dir"
+  ln -nsf "$2" "$PSI_TARGET$1"
+}
+
+psi-nssroot () {
+  psi-empty /etc/group
+  psi-empty /etc/passwd
+  psi-empty /etc/nsswitch.conf
+
+  psi-append /etc/group         root:x:0:
+  psi-append /etc/passwd        root:x:0:0:root:/root:/bin/bash
+  psi-append /etc/nsswitch.conf passwd: files
+  psi-append /etc/nsswitch.conf group: files
+}
+
+psi-psi () {
+  psi-dir /dev
+  psi-dir /etc/alternatives
+  psi-dir /proc
+  psi-dir /run
+  psi-dir /sys
+  psi-dir /tmp
+  psi-dir /usr/bin
+  psi-dir /usr/lib/ssl
+  psi-dir /usr/lib/x86_64-linux-gnu usr/lib64
+  psi-dir /usr/sbin
+  psi-dir /usr/share
+  psi-dir /var/tmp
+
+  psi-empty /etc/machine-id
+  psi-empty /etc/resolv.conf
+
+  psi-link /bin     /usr/bin
+  psi-link /lib     /usr/lib
+  psi-link /lib64   /usr/lib64
+  psi-link /sbin    /usr/sbin
+}

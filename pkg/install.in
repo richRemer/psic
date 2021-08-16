@@ -1,0 +1,25 @@
+#!/bin/bash -e
+
+if test "{{SHARED}}"; then
+  echo "configuring shared PSI cache"
+
+  if ! getent group psi &>/dev/null; then
+    echo "creating 'psi' system group"
+    groupadd -r psi
+  fi
+fi
+
+echo "creating cache in {{CACHEDIR}}/psi"
+mkdir -p "{{CACHEDIR}}"/psi
+
+if test "{{SHARED}}"; then
+  echo "configuring cache permissions"
+  chgrp psi "{{CACHEDIR}}"/psi
+  chmod g+ws "{{CACHEDIR}}"/psi
+fi
+
+echo "copying to {{PREFIX}}/"
+mkdir -p "{{PREFIX}}"/bin "{{PREFIX}}"/lib/psi
+cp lib/psi/psilib "{{PREFIX}}"/lib/psi/
+cp bin/psic "{{PREFIX}}"/bin/
+sed -i s@{{cachedir}}@{{CACHEDIR}}/psi@g "{{PREFIX}}"/bin/psic
